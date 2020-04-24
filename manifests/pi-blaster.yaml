@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pi-blaster
+  labels:
+    app.kubernetes.io/name: pi-blaster
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pi-blaster
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pi-blaster
+    spec:
+      containers:
+      - name: pi-blaster
+        imagePullPolicy: Always
+        image: squat/pi-blaster:latest
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: dev
+          mountPath: /dev
+      volumes:
+      - name: dev
+        hostPath:
+          path: /dev

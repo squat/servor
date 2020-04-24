@@ -7,15 +7,17 @@ Servor is a tiny HTTP API that can control a servo connected to a GPIO pin.
 
 ## Getting Started
 
+First, install servor's one dependency: [pi-blaster](https://github.com/sarfata/pi-blaster).
 The easiest way to use servor is with the prebuilt container, e.g.:
 
 ```shell
-$ docker run -p 8080:8080 squat/servor --pin=18
+docker run -p 8080:8080 squat/servor --pin=18
 ```
 
 This container can be deployed to a Kubernetes cluster running on nodes with GPIO, e.g. a Raspberry PI running k3s:
 
 ```shell
+kubectl apply -f https://raw.githubusercontent.com/squat/servor/master/manifests/pi-blaster.yaml
 kubectl apply -f https://raw.githubusercontent.com/squat/servor/master/manifests/servor.yaml
 kubectl port-forward svc/servor 8080
 ```

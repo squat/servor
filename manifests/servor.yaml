@@ -25,6 +25,13 @@ spec:
           name: http
         securityContext:
           privileged: true
+        volumeMounts:
+        - name: dev
+          mountPath: /dev
+      volumes:
+      - name: dev
+        hostPath:
+          path: /dev
 ---
 apiVersion: v1
 kind: Service
@@ -35,7 +42,7 @@ metadata:
 spec:
   ports:
   - name: http
-    port: 8080
+    port: 80
     targetPort: 8080
   selector:
     app.kubernetes.io/name: servor

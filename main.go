@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	stdlog "log"
 	"net/http"
 	"net/http/pprof"
@@ -17,13 +18,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	flag "github.com/spf13/pflag"
-	"github.com/stianeikeland/go-rpio"
 )
 
-const (
-	f       = 50
-	rpioMin = 50000
-)
+const piBlaster = "/dev/pi-blaster"
 
 var (
 	requestsTotal = prometheus.NewCounterVec(
@@ -36,21 +33,24 @@ var (
 
 func main() {
 	opts := struct {
-		Frequency uint32
-		Listen    string
-		Max       uint32
-		Min       uint32
-		Pin       int
-		Steps     uint32
+		Listen string
+		Pin    int
+		Max    float64
+		Min    float64
+		Steps  uint32
 	}{}
 
-	flag.Uint32Var(&opts.Frequency, "frequency", f, "The frequency of the servo.")
 	flag.StringVar(&opts.Listen, "listen", ":8080", "The address on which internal server runs.")
-	flag.Uint32Var(&opts.Max, "max", 13, "The maximum duty cycle length as a percentage of the period.")
-	flag.Uint32Var(&opts.Min, "min", 2, "The minimum duty cycle length as a percentage of the period.")
-	flag.IntVar(&opts.Pin, "pin", 18, "The number of the BCM2835 number of the pin to use.")
-	flag.Uint32Var(&opts.Steps, "steps", 100, "Break the period into this many steps.")
+	flag.IntVar(&opts.Pin, "pin", 18, "The number of the BCM2835 pin to use.")
+	flag.Float64Var(&opts.Max, "max", 1, "The maximum acceptable PWM value; must be more than --min.")
+	flag.Float64Var(&opts.Min, "min", 0, "The minimum acceptable PWM valuel must be less than --max.")
+	flag.Uint32Var(&opts.Steps, "steps", 20, "The number of steps between --min and --max.")
 	flag.Parse()
+
+	if opts.Min >= opts.Max {
+		stdlog.Fatalf("--min must be less than --max; got %f and %f, respectively", opts.Min, opts.Max)
+		return
+	}
 
 	logger := log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr))
 	logger = log.WithPrefix(logger, "ts", log.DefaultTimestampUTC)
@@ -62,11 +62,6 @@ func main() {
 		prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}),
 		requestsTotal,
 	)
-
-	if err := rpio.Open(); err != nil {
-		level.Error(logger).Log("err", err)
-		return
-	}
 
 	var g run.Group
 	{
@@ -85,7 +80,7 @@ func main() {
 		router := http.NewServeMux()
 		router.Handle("/metrics", promhttp.InstrumentMetricHandler(reg, promhttp.HandlerFor(reg, promhttp.HandlerOpts{})))
 		router.HandleFunc("/debug/pprof/", pprof.Index)
-		router.Handle("/", newServor(opts.Pin, opts.Frequency, opts.Max, opts.Min, opts.Steps, logger))
+		router.Handle("/", newServor(opts.Pin, opts.Min, opts.Max, opts.Steps, logger))
 
 		srv := &http.Server{Addr: opts.Listen, Handler: router}
 
@@ -106,47 +101,49 @@ func main() {
 		})
 	}
 
-	defer func() {
-		if err := rpio.Close(); err != nil {
-			level.Error(logger).Log("err", err)
-		}
-	}()
-
 	if err := g.Run(); err != nil {
 		stdlog.Fatal(err)
 	}
 }
 
 type servor struct {
-	rpio.Pin
-	max      uint32
-	min      uint32
-	position uint32
-	scale    uint32
-	steps    uint32
+	pin      int
+	position float64
+	min      float64
+	max      float64
+	step     float64
 
 	mu     sync.Mutex
 	logger log.Logger
 }
 
-func newServor(pin int, frequency, max, min, steps uint32, logger log.Logger) *servor {
-	p := rpio.Pin(pin)
-	p.Pwm()
-	scale := rpioMin / frequency / steps
-	if scale == 0 {
-		scale = 1
-	}
-	p.Freq(int(frequency * scale * steps))
-
+func newServor(pin int, min, max float64, steps uint32, logger log.Logger) *servor {
 	return &servor{
-		Pin:      p,
-		steps:    steps,
-		logger:   logger,
+		pin:      pin,
+		position: 0,
 		max:      max,
 		min:      min,
-		position: steps * min / 100,
-		scale:    scale,
+		step:     (max - min) / float64(steps),
+		logger:   logger,
 	}
+}
+
+func (s *servor) set() error {
+	if s.position > s.max {
+		s.position = s.max
+	}
+	if s.position < s.min {
+		s.position = s.min
+	}
+
+	f, err := os.OpenFile(piBlaster, os.O_WRONLY|os.O_APPEND, 0644)
+	defer f.Close()
+	if err != nil {
+		return err
+	}
+
+	_, err = fmt.Fprintf(f, "%d=%f\n", s.pin, s.position)
+	return err
 }
 
 func (s *servor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -167,22 +164,18 @@ func (s *servor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case "/api/left":
 			s.mu.Lock()
 			defer s.mu.Unlock()
-			if s.position != s.steps*s.max/100 {
-				s.position++
-			}
-			s.DutyCycle(s.position*s.scale, s.steps*s.scale)
-			w.WriteHeader(http.StatusOK)
-			return
+			s.position += s.step
 		case "/api/right":
 			s.mu.Lock()
 			defer s.mu.Unlock()
-			if s.position != s.steps*s.min/100 {
-				s.position--
-			}
-			s.DutyCycle(s.position*s.scale, s.steps*s.scale)
-			w.WriteHeader(http.StatusOK)
+			s.position -= s.step
+		}
+		if err := s.set(); err != nil {
+			level.Error(s.logger).Log("err", err)
+			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
+		w.WriteHeader(http.StatusOK)
 		return
 	}
 	w.WriteHeader(http.StatusNotFound)
